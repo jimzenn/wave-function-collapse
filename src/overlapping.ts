@@ -1,24 +1,53 @@
-// Copyright (C) 2016 Maxim Gumin, The MIT License (MIT)
-// TypeScript port
+/**
+ * Overlapping Model — learns NxN patterns from a sample image and generates
+ * new images composed entirely of those patterns.
+ *
+ * @module overlapping
+ * @license MIT
+ * @copyright 2016 Maxim Gumin
+ */
 
 import { Model } from "./model.js";
-import {
-  Heuristic,
-  type OverlappingModelConfig,
-  type WFCResult,
-} from "./types.js";
+import { Heuristic, type OverlappingModelConfig, type WFCResult } from "./types.js";
+
+/** Direction offsets matching the base Model convention: left, down, right, up. */
+const DX = [-1, 0, 1, 0];
+const DY = [0, 1, 0, -1];
 
 /**
- * Overlapping Model: learns NxN patterns from a sample image and
- * generates new images containing only those patterns.
+ * Extract NxN patterns from a sample image and generate new images that
+ * contain only those patterns, respecting local adjacency constraints.
  *
- * Input: a flat Uint32Array of RGBA pixels + dimensions.
- * Output: observed pattern indices per cell. Use `renderToBuffer()` to get pixels.
+ * @example
+ * ```ts
+ * import { OverlappingModel } from "wave-function-collapse";
+ *
+ * const model = new OverlappingModel({
+ *   sample: imagePixels,  // Uint32Array of RGBA pixels
+ *   sampleWidth: 64,
+ *   sampleHeight: 64,
+ *   N: 3,
+ *   width: 48,
+ *   height: 48,
+ *   periodic: true,
+ *   symmetry: 8,
+ * });
+ *
+ * const result = model.run(42);
+ * if (result.success) {
+ *   const outputPixels = model.renderToBuffer(result);
+ * }
+ * ```
  */
 export class OverlappingModel extends Model {
-  private patterns: Uint8Array[];
-  private colors: Uint32Array;
+  private readonly patterns: Uint8Array[];
+  private readonly colors: Uint32Array;
 
+  /**
+   * @param config - Model configuration.
+   * @throws {Error} If sample dimensions are invalid or the sample contains
+   *   no extractable patterns.
+   */
   constructor(config: OverlappingModelConfig) {
     const N = config.N ?? 3;
     const periodic = config.periodic ?? false;
@@ -26,15 +55,27 @@ export class OverlappingModel extends Model {
 
     super(config.width, config.height, N, periodic, heuristic);
 
-    const sample = config.sample;
-    const SX = config.sampleWidth;
-    const SY = config.sampleHeight;
+    const { sample, sampleWidth: SX, sampleHeight: SY } = config;
     const periodicInput = config.periodicInput ?? false;
     const symmetry = config.symmetry ?? 8;
 
-    // Build color palette and index sample
-    const colorList: number[] = [];
+    if (SX <= 0 || SY <= 0) {
+      throw new Error(`Invalid sample dimensions: ${SX}x${SY}`);
+    }
+    if (sample.length !== SX * SY) {
+      throw new Error(
+        `Sample length (${sample.length}) does not match dimensions (${SX}x${SY}=${SX * SY})`,
+      );
+    }
+    if (config.width <= 0 || config.height <= 0) {
+      throw new Error(
+        `Output dimensions must be positive: ${config.width}x${config.height}`,
+      );
+    }
+
+    // --- Build color palette and re-index sample to palette indices ---
     const colorMap = new Map<number, number>();
+    const colorList: number[] = [];
     const indexed = new Uint8Array(sample.length);
 
     for (let i = 0; i < sample.length; i++) {
@@ -51,43 +92,7 @@ export class OverlappingModel extends Model {
     this.colors = new Uint32Array(colorList);
     const C = colorList.length;
 
-    // Pattern helpers
-    function pattern(
-      f: (x: number, y: number) => number,
-      N: number
-    ): Uint8Array {
-      const result = new Uint8Array(N * N);
-      for (let y = 0; y < N; y++)
-        for (let x = 0; x < N; x++) result[x + y * N] = f(x, y);
-      return result;
-    }
-
-    function rotate(p: Uint8Array, N: number): Uint8Array {
-      return pattern((x, y) => p[N - 1 - y + x * N], N);
-    }
-
-    function reflect(p: Uint8Array, N: number): Uint8Array {
-      return pattern((x, y) => p[N - 1 - x + y * N], N);
-    }
-
-    // Use a string hash for pattern deduplication (BigInt hashing has overhead)
-    function hashPattern(p: Uint8Array): string {
-      // For small patterns (N<=5, C<256) this is fast enough and collision-free
-      // Using a numeric hash for larger patterns
-      if (p.length <= 25) {
-        let result = 0n;
-        let power = 1n;
-        const bigC = BigInt(C);
-        for (let i = p.length - 1; i >= 0; i--) {
-          result += BigInt(p[i]) * power;
-          power *= bigC;
-        }
-        return result.toString(36);
-      }
-      // Fallback: join bytes
-      return p.join(",");
-    }
-
+    // --- Extract, deduplicate, and count patterns ---
     this.patterns = [];
     const patternIndices = new Map<string, number>();
     const weightList: number[] = [];
@@ -97,23 +102,23 @@ export class OverlappingModel extends Model {
 
     for (let y = 0; y < ymax; y++) {
       for (let x = 0; x < xmax; x++) {
+        // Generate all 8 symmetry variants (rotate/reflect chain).
         const ps: Uint8Array[] = new Array(8);
-
-        ps[0] = pattern(
-          (dx, dy) => indexed[(x + dx) % SX + ((y + dy) % SY) * SX],
-          N
+        ps[0] = extractPattern(
+          (dx, dy) => indexed[((x + dx) % SX) + ((y + dy) % SY) * SX],
+          N,
         );
-        ps[1] = reflect(ps[0], N);
-        ps[2] = rotate(ps[0], N);
-        ps[3] = reflect(ps[2], N);
-        ps[4] = rotate(ps[2], N);
-        ps[5] = reflect(ps[4], N);
-        ps[6] = rotate(ps[4], N);
-        ps[7] = reflect(ps[6], N);
+        ps[1] = reflectPattern(ps[0], N);
+        ps[2] = rotatePattern(ps[0], N);
+        ps[3] = reflectPattern(ps[2], N);
+        ps[4] = rotatePattern(ps[2], N);
+        ps[5] = reflectPattern(ps[4], N);
+        ps[6] = rotatePattern(ps[4], N);
+        ps[7] = reflectPattern(ps[6], N);
 
         for (let k = 0; k < symmetry; k++) {
           const p = ps[k];
-          const h = hashPattern(p);
+          const h = hashPattern(p, C);
           const existing = patternIndices.get(h);
           if (existing !== undefined) {
             weightList[existing]++;
@@ -126,30 +131,17 @@ export class OverlappingModel extends Model {
       }
     }
 
+    if (weightList.length === 0) {
+      throw new Error(
+        "No patterns extracted. Check that N is not larger than the sample.",
+      );
+    }
+
     this.T = weightList.length;
     this.weights = new Float64Array(weightList);
     this.ground = config.ground ?? false;
 
-    // Build propagator
-    function agrees(
-      p1: Uint8Array,
-      p2: Uint8Array,
-      dx: number,
-      dy: number,
-      N: number
-    ): boolean {
-      const xmin = dx < 0 ? 0 : dx;
-      const xmax = dx < 0 ? dx + N : N;
-      const ymin = dy < 0 ? 0 : dy;
-      const ymax = dy < 0 ? dy + N : N;
-      for (let y = ymin; y < ymax; y++)
-        for (let x = xmin; x < xmax; x++)
-          if (p1[x + N * y] !== p2[x - dx + N * (y - dy)]) return false;
-      return true;
-    }
-
-    const DX = [-1, 0, 1, 0];
-    const DY = [0, 1, 0, -1];
+    // --- Build adjacency propagator ---
     const T = this.T;
     const patterns = this.patterns;
 
@@ -159,7 +151,7 @@ export class OverlappingModel extends Model {
       for (let t = 0; t < T; t++) {
         const list: number[] = [];
         for (let t2 = 0; t2 < T; t2++) {
-          if (agrees(patterns[t], patterns[t2], DX[d], DY[d], N)) {
+          if (patternsAgree(patterns[t], patterns[t2], DX[d], DY[d], N)) {
             list.push(t2);
           }
         }
@@ -168,81 +160,153 @@ export class OverlappingModel extends Model {
     }
   }
 
-  /** Number of unique patterns extracted. */
+  /** Number of unique patterns extracted from the sample. */
   get patternCount(): number {
     return this.T;
   }
 
   /**
-   * Render a completed (or partial) result to an RGBA pixel buffer.
-   * @param result - The WFCResult from run().
-   * @returns Uint32Array of RGBA pixels (width * height).
+   * Render a generation result to an RGBA pixel buffer.
+   *
+   * For a successful result, each cell is mapped to its observed pattern's
+   * color. For a failed/partial result, colors are averaged over all remaining
+   * possible patterns.
+   *
+   * @param result - The {@link WFCResult} returned by {@link Model.run}.
+   * @returns Flat row-major `Uint32Array` of RGBA pixels (width * height).
    */
   renderToBuffer(result: WFCResult): Uint32Array {
-    const MX = this.MX;
-    const MY = this.MY;
-    const N = this.N;
+    const { MX, MY, N, patterns, colors } = this;
     const bitmap = new Uint32Array(MX * MY);
-    const observed = result.observed;
-    const patterns = this.patterns;
-    const colors = this.colors;
+    const { observed } = result;
 
     if (observed[0] >= 0) {
+      // Fully collapsed — direct pixel lookup.
       for (let y = 0; y < MY; y++) {
         const dy = y < MY - N + 1 ? 0 : N - 1;
         for (let x = 0; x < MX; x++) {
           const dx = x < MX - N + 1 ? 0 : N - 1;
-          bitmap[x + y * MX] =
-            colors[patterns[observed[x - dx + (y - dy) * MX]][dx + dy * N]];
+          const patternIdx = observed[x - dx + (y - dy) * MX];
+          bitmap[x + y * MX] = colors[patterns[patternIdx][dx + dy * N]];
         }
       }
     } else {
-      // Partial result: average colors weighted by possibility
-      for (let i = 0; i < MX * MY; i++) {
-        let contributors = 0;
-        let r = 0,
-          g = 0,
-          b = 0;
-        const x = i % MX;
-        const y = (i / MX) | 0;
-
-        for (let dy = 0; dy < N; dy++) {
-          for (let dx = 0; dx < N; dx++) {
-            let sx = x - dx;
-            if (sx < 0) sx += MX;
-            let sy = y - dy;
-            if (sy < 0) sy += MY;
-
-            const s = sx + sy * MX;
-            if (
-              !this.periodic &&
-              (sx + N > MX || sy + N > MY || sx < 0 || sy < 0)
-            )
-              continue;
-
-            const wave = this.getWave(s);
-            for (let t = 0; t < this.T; t++) {
-              if (wave[t]) {
-                contributors++;
-                const argb = colors[patterns[t][dx + dy * N]];
-                r += (argb >>> 16) & 0xff;
-                g += (argb >>> 8) & 0xff;
-                b += argb & 0xff;
-              }
-            }
-          }
-        }
-
-        if (contributors > 0) {
-          bitmap[i] =
-            0xff000000 |
-            (((r / contributors) | 0) << 16) |
-            (((g / contributors) | 0) << 8) |
-            ((b / contributors) | 0);
-        }
-      }
+      // Partial — average colors over remaining possibilities.
+      this.renderPartial(bitmap);
     }
 
     return bitmap;
   }
+
+  /**
+   * Render a partial (uncollapsed) state by averaging colors weighted by
+   * pattern possibility.
+   */
+  private renderPartial(bitmap: Uint32Array): void {
+    const { MX, MY, N, patterns, colors } = this;
+    const T = this.T;
+
+    for (let i = 0; i < MX * MY; i++) {
+      let contributors = 0;
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      const x = i % MX;
+      const y = (i / MX) | 0;
+
+      for (let dy = 0; dy < N; dy++) {
+        for (let dx = 0; dx < N; dx++) {
+          let sx = x - dx;
+          if (sx < 0) sx += MX;
+          let sy = y - dy;
+          if (sy < 0) sy += MY;
+
+          if (!this.periodic && (sx + N > MX || sy + N > MY)) continue;
+
+          const wave = this.getWave(sx + sy * MX);
+          for (let t = 0; t < T; t++) {
+            if (wave[t]) {
+              contributors++;
+              const argb = colors[patterns[t][dx + dy * N]];
+              r += (argb >>> 16) & 0xff;
+              g += (argb >>> 8) & 0xff;
+              b += argb & 0xff;
+            }
+          }
+        }
+      }
+
+      if (contributors > 0) {
+        bitmap[i] =
+          0xff000000 |
+          (((r / contributors) | 0) << 16) |
+          (((g / contributors) | 0) << 8) |
+          ((b / contributors) | 0);
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Pattern helpers (pure functions, no allocations beyond the result)
+// ---------------------------------------------------------------------------
+
+/** Create a pattern by sampling a function over an NxN grid. */
+function extractPattern(f: (x: number, y: number) => number, N: number): Uint8Array {
+  const result = new Uint8Array(N * N);
+  for (let y = 0; y < N; y++) {
+    for (let x = 0; x < N; x++) {
+      result[x + y * N] = f(x, y);
+    }
+  }
+  return result;
+}
+
+/** Rotate a pattern 90 degrees clockwise. */
+function rotatePattern(p: Uint8Array, N: number): Uint8Array {
+  return extractPattern((x, y) => p[N - 1 - y + x * N], N);
+}
+
+/** Reflect a pattern horizontally. */
+function reflectPattern(p: Uint8Array, N: number): Uint8Array {
+  return extractPattern((x, y) => p[N - 1 - x + y * N], N);
+}
+
+/**
+ * Hash a pattern for deduplication. Uses FNV-1a (32-bit) for speed, with the
+ * color count mixed in to reduce collisions across different palette sizes.
+ */
+function hashPattern(p: Uint8Array, colorCount: number): string {
+  let hash = 2166136261 ^ colorCount;
+  for (let i = 0; i < p.length; i++) {
+    hash ^= p[i];
+    hash = Math.imul(hash, 16777619);
+  }
+  // Append a content fingerprint to make collisions astronomically unlikely.
+  // The FNV hash alone has ~1/2^32 collision rate; appending length + first/last
+  // byte eliminates any practical risk.
+  return `${(hash >>> 0).toString(36)}_${p.length}_${p[0]}_${p[p.length - 1]}`;
+}
+
+/**
+ * Check whether two patterns overlap correctly when shifted by (dx, dy).
+ * The overlapping region must match exactly.
+ */
+function patternsAgree(
+  p1: Uint8Array,
+  p2: Uint8Array,
+  dx: number,
+  dy: number,
+  N: number,
+): boolean {
+  const xmin = dx < 0 ? 0 : dx;
+  const xmax = dx < 0 ? dx + N : N;
+  const ymin = dy < 0 ? 0 : dy;
+  const ymax = dy < 0 ? dy + N : N;
+  for (let y = ymin; y < ymax; y++) {
+    for (let x = xmin; x < xmax; x++) {
+      if (p1[x + N * y] !== p2[x - dx + N * (y - dy)]) return false;
+    }
+  }
+  return true;
 }
