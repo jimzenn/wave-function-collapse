@@ -1,4 +1,4 @@
-# WaveFunctionCollapse
+# wave-function-collapse
 
 High-performance TypeScript implementation of the [Wave Function Collapse](https://github.com/mxgmn/WaveFunctionCollapse) algorithm for procedural generation.
 
