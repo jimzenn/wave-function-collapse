@@ -1,5 +1,5 @@
 {
-  "name": "wavefunctioncollapse",
+  "name": "wave-function-collapse",
   "version": "1.0.0",
   "description": "High-performance Wave Function Collapse algorithm for procedural generation",
   "type": "module",

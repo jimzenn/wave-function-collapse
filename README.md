@@ -10,13 +10,13 @@ Zero dependencies. Pure ESM. Works with any JavaScript runtime (Node, Bun, Deno)
 ## Install
 
 ```bash
-npm install wavefunctioncollapse
+npm install wave-function-collapse
 ```
 
 Or add it directly from the repository:
 
 ```bash
-npm install github:jimzenn/wavefunctioncollapse
+npm install github:jimzenn/wave-function-collapse
 ```
 
 ## Quick Start
@@ -26,7 +26,7 @@ npm install github:jimzenn/wavefunctioncollapse
 Learns NxN patterns from a sample image and generates new images containing only those patterns.
 
 ```typescript
-import { OverlappingModel } from "wavefunctioncollapse";
+import { OverlappingModel } from "wave-function-collapse";
 
 // sample: Uint32Array of RGBA pixels from your input image
 // e.g. from a canvas: new Uint32Array(ctx.getImageData(0, 0, w, h).data.buffer)
@@ -55,7 +55,7 @@ if (result.success) {
 Uses pre-defined tiles with explicit adjacency rules. Ideal for tilemaps, dungeon generation, circuit layouts, etc.
 
 ```typescript
-import { SimpleTiledModel } from "wavefunctioncollapse";
+import { SimpleTiledModel } from "wave-function-collapse";
 
 const model = new SimpleTiledModel({
   tiles: [
@@ -171,7 +171,7 @@ interface NeighborRule {
 ### `Heuristic`
 
 ```typescript
-import { Heuristic } from "wavefunctioncollapse";
+import { Heuristic } from "wave-function-collapse";
 
 Heuristic.Entropy  // Best quality (default)
 Heuristic.MRV      // Minimum Remaining Values — fast, good quality
